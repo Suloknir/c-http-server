@@ -16,6 +16,11 @@ volatile bool sigint_receaved = false;
 DIR *document_root = NULL;
 int server_fd = -1;
 
+void sigint_handler(int signum) // NOLINT
+{
+    sigint_receaved = true;
+}
+
 void clean_exit(int status)
 {
     if (document_root != NULL)
@@ -107,14 +112,20 @@ err:
 
 int main(int argc, char *argv[])
 {
-
+    struct sigaction sa = {0};
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sa.sa_handler = sigint_handler;
+    sigaction(SIGINT, &sa, NULL);
     int port;
     char *document_root_path;
     parse_argv(argc, argv, &port, &document_root_path);
     open_document_root(document_root_path);
     setup_server_socket(port);
     printf("port: %d, document_root: %s\n", port, document_root_path);
-
+    while (!sigint_receaved)
+    {
+    }
     clean_exit(EXIT_SUCCESS);
     return 0;
 }
