@@ -1,13 +1,16 @@
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <err.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 #ifndef unlikely
 #define unlikely(x) __builtin_expect(!!(x), 0)
@@ -20,23 +23,24 @@ DIR *document_root = NULL;
 int server_fd = -1;
 int epoll_fd = -1;
 
-void print_spinner(void)
+void print_spinner(int port)
 {
     static uint8_t i = 0;
     const char *const dots[] = {
-        ".    ", // 0
-        "..   ", // 1
-        "...  ", // 2
-        ".... ", // 3
-        ".....", // 4
+        "|>    |", // 0
+        "| >   |", // 1
+        "|  >  |", // 2
+        "|   > |", // 3
+        "|    >|", // 4
+        "|    ^|", // 5
+        "|    <|", // 6
+        "|   < |", // 7
+        "|  <  |", // 8
+        "| <   |", // 9
+        "|<    |", // 10
+        "|^    |", // 11
     };
-    const char sticks[] = {
-        '|', // 0
-        '/', // 1
-        '-', // 2
-        '\\', // 3
-    };
-    printf("\rWaiting for connection%s %c", dots[i % 4], sticks[i % 3]);
+    printf("\rListening on %d %s", port, dots[i % 12]);
     fflush(stdout);
     i++;
 }
@@ -135,28 +139,104 @@ void setup_server_socket(int port)
 
 void setup_epoll(bool cloexec)
 {
-    int flags = cloexec ? EPOLL_CLOEXEC : 0;
+    const int flags = cloexec ? EPOLL_CLOEXEC : 0;
     epoll_fd = epoll_create1(flags);
     if (unlikely(epoll_fd) == -1)
         clean_exit(EXIT_FAILURE, "epoll_create1 error");
     struct epoll_event ev;
     ev.events = EPOLLIN;
     ev.data.fd = server_fd;
-    int ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &ev);
+    const int ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &ev);
     if (unlikely(ret == -1))
-        clean_exit(EXIT_FAILURE, "epoll_ctl error");
+        clean_exit(EXIT_FAILURE, "(setup) epoll_ctl error");
 }
 
-void loop(void)
+void register_client(void)
+{
+    struct sockaddr_in client_addr;
+    socklen_t addr_len = sizeof(client_addr);
+    int client_fd = accept(server_fd, &client_addr, &addr_len);
+    if (client_fd == -1)
+    {
+        perror("(register) accept error");
+        return;
+    }
+    struct epoll_event ev;
+    ev.events = EPOLLIN;
+    ev.data.fd = client_fd;
+    const int ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev);
+    if (unlikely(ret == -1))
+        clean_exit(EXIT_FAILURE, "(register client) epoll_ctl error");
+}
+
+void handle_http_request(int client_fd, char *buffer)
+{
+    char method[16];
+    char path[256];
+    char protocol[16];
+    if (sscanf(buffer, "%15s %255s %15s", method, path, protocol) != 3)
+        return;
+    if (strcmp(method, "TESTING") != 0)
+    {
+        const char *response_501 = //
+            "HTTP/1.1 501 Not implemented\r\n"
+            "Content-Type: text/plain\r\n"
+            "Content-Length: 0\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+        write(client_fd, response_501, strlen(response_501));
+        return;
+    }
+}
+
+void process_request(int client_fd)
+{
+    const int buffer_size = 4096;
+    char buffer[buffer_size];
+    ssize_t bytes_read = read(client_fd, &buffer, buffer_size - 1);
+    if (unlikely(bytes_read == -1))
+    {
+        perror("read error");
+        goto close;
+    }
+    if (bytes_read == 0)
+        goto close;
+    buffer[bytes_read] = '\0';
+    handle_http_request(client_fd, buffer);
+close:
+    close(client_fd);
+}
+
+void loop(int port)
 {
     struct epoll_event events[MAX_EVENTS];
     int nfds;
     for (;;)
     {
-        print_spinner();
-        nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, 400);
+        print_spinner(port);
+        nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, 300);
         if (sigint_receaved)
             break;
+        if (nfds == -1)
+        {
+            if (errno == EINTR)
+                continue;
+            clean_exit(EXIT_FAILURE, "epoll_wait error");
+        }
+        else if (nfds == 0)
+            continue;
+        printf("\r\033[K");
+        for (int i = 0; i < nfds; i++)
+        {
+            if (events[i].data.fd == server_fd)
+            {
+                register_client();
+            }
+            else
+            {
+                process_request(events[i].data.fd);
+            }
+        }
     }
 }
 
@@ -174,8 +254,10 @@ int main(int argc, char *argv[])
     setup_server_socket(port);
     setup_epoll(false);
 
-    printf("Port: %d | document root: %s\n", port, document_root_path);
-    loop();
+    printf("Port: %d\n", port);
+    printf("Document root: %s\n", document_root_path);
+    printf("-------------------------\n");
+    loop(port);
     clean_exit(EXIT_SUCCESS, NULL);
     return 0;
 }
