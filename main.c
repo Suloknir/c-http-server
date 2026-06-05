@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #ifndef unlikely
@@ -19,6 +20,8 @@
 #define MAX_EVENTS 10
 
 volatile bool sigint_receaved = false;
+char *doc_root_path = NULL;
+
 DIR *document_root = NULL;
 int server_fd = -1;
 int epoll_fd = -1;
@@ -151,7 +154,7 @@ void setup_epoll(bool cloexec)
         clean_exit(EXIT_FAILURE, "(setup) epoll_ctl error");
 }
 
-void register_client(void)
+inline void register_client(void)
 {
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);
@@ -169,45 +172,114 @@ void register_client(void)
         clean_exit(EXIT_FAILURE, "(register client) epoll_ctl error");
 }
 
-void handle_http_request(int client_fd, char *buffer)
+void send_response_error(int client_fd, int response_code)
+{
+    const char *response_400 = //
+        "HTTP/1.1 400 Bad Request\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    const char *response_403 = //
+        "HTTP/1.1 403 Forbidden\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    const char *response_404 = //
+        "HTTP/1.1 404 Not Found\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    const char *response_500 = //
+        "HTTP/1.1 500 Internal Server Error\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    const char *response_501 = //
+        "HTTP/1.1 501 Not implemented\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    const char *response_choosen = NULL;
+    switch (response_code)
+    {
+        case 400:
+            response_choosen = response_400;
+            break;
+        case 403:
+            response_choosen = response_403;
+            break;
+        case 404:
+            response_choosen = response_404;
+            break;
+        case 500:
+            response_choosen = response_500;
+            break;
+        case 501:
+            response_choosen = response_501;
+            break;
+        default:
+            perror("Wrong reponse code");
+            response_choosen = response_501;
+    }
+    write(client_fd, response_choosen, strlen(response_choosen));
+}
+
+inline void handle_http_request(int client_fd, char *buffer)
 {
     char method[16];
     char path[256];
     char protocol[16];
     if (sscanf(buffer, "%15s %255s %15s", method, path, protocol) != 3)
-        return;
-    if (strcmp(method, "TESTING") != 0)
     {
-        const char *response_501 = //
-            "HTTP/1.1 501 Not implemented\r\n"
-            "Content-Type: text/plain\r\n"
-            "Content-Length: 0\r\n"
-            "Connection: close\r\n"
-            "\r\n";
-        write(client_fd, response_501, strlen(response_501));
+        send_response_error(client_fd, 400);
         return;
     }
+    if (strcmp(method, "GET") != 0)
+    {
+        send_response_error(client_fd, 501);
+        return;
+    }
+
+    if (strstr(path, "..") != NULL)
+    {
+        send_response_error(client_fd, 403);
+        return;
+    }
+    if (strcmp(path, "/") == 0)
+        strcpy(path, "/index.html");
+    char file_path[512];
+    snprintf(file_path, sizeof(file_path), "%s%s", doc_root_path, path);
+    FILE *file = fopen(file_path, "rb");
+    struct stat sb;
+    //todo: fstat, sendfile, content-length = header_len + file_len
+    //      write header in client_fd socket, then sendfile
+    fclose(file);
+    return;
 }
 
-void process_request(int client_fd)
+inline void process_request(int client_fd)
 {
     const int buffer_size = 4096;
     char buffer[buffer_size];
-    ssize_t bytes_read = read(client_fd, &buffer, buffer_size - 1);
+    ssize_t bytes_read = read(client_fd, buffer, buffer_size - 1);
     if (unlikely(bytes_read == -1))
     {
         perror("read error");
+        send_response_error(client_fd, 500);
         goto close;
     }
     if (bytes_read == 0)
+    {
+        send_response_error(client_fd, 400);
         goto close;
+    }
     buffer[bytes_read] = '\0';
     handle_http_request(client_fd, buffer);
 close:
     close(client_fd);
 }
 
-void loop(int port)
+inline void loop(int port)
 {
     struct epoll_event events[MAX_EVENTS];
     int nfds;
