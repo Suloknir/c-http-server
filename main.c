@@ -44,7 +44,7 @@ void print_spinner(int port)
         "|<    |", // 10
         "|^    |", // 11
     };
-    printf("\rListening on %d %s", port, dots[i % 12]);
+    printf("\rListening on %5d %s", port, dots[i % 12]);
     fflush(stdout);
     i++;
 }
@@ -230,17 +230,17 @@ const char *get_mime_type(const char *path)
 {
     const char *dot = strrchr(path, '.');
     if (dot == NULL)
-        return "text/plain";
+        return "text/plain; charset=utf-8";
     // clang-format off
-    if (strcmp(dot, ".html") == 0 || strcmp(dot, ".htm") == 0) return "text/html";
-    if (strcmp(dot, ".css") == 0) return "text/css";
-    if (strcmp(dot, ".js") == 0) return "application/javascript";
+    if (strcmp(dot, ".html") == 0 || strcmp(dot, ".htm") == 0) return "text/html; charset=utf-8";
+    if (strcmp(dot, ".css") == 0) return "text/css; charset=utf-8";
+    if (strcmp(dot, ".js") == 0) return "application/javascript; charset=utf-8";
     if (strcmp(dot, ".jpg") == 0 || strcmp(dot, ".jpeg") == 0) return "image/jpeg";
     if (strcmp(dot, ".png") == 0) return "image/png";
     if (strcmp(dot, ".gif") == 0) return "image/gif";
-    if (strcmp(dot, ".txt") == 0) return "text/plain";
+    if (strcmp(dot, ".txt") == 0) return "text/plain; charset=utf-8";
     // clang-format on
-
+    // return "text/plain";
     return "application/octet-stream";
 }
 
@@ -254,12 +254,12 @@ void handle_http_request(const int client_fd, const char *request)
         send_response_error(client_fd, 400);
         return;
     }
+    // printf("Path: %s\n", path);
     if (strcmp(method, "GET") != 0)
     {
         send_response_error(client_fd, 501);
         return;
     }
-
     if (strstr(path, "..") != NULL)
     {
         send_response_error(client_fd, 403);
@@ -287,6 +287,7 @@ void handle_http_request(const int client_fd, const char *request)
     }
     char header_buffer[512];
     const char *mime_type = get_mime_type(file_path);
+    // printf("Path: %s, corresponding mime: %s\n", path, mime_type);
     int header_len = snprintf(header_buffer, sizeof(header_buffer),
                               "HTTP/1.1 200 OK\r\n"
                               "Content-Type: %s\r\n"
@@ -294,7 +295,7 @@ void handle_http_request(const int client_fd, const char *request)
                               "Connection: close\r\n"
                               "\r\n",
                               mime_type, file_stat.st_size);
-    printf("SENDING:\n%s", header_buffer);
+    // printf("SENDING:\n%s", header_buffer);
     write(client_fd, header_buffer, header_len);
     sendfile(client_fd, file_fd, NULL, file_stat.st_size);
 close:
@@ -371,7 +372,6 @@ int main(int argc, char *argv[])
 
     printf("Port: %d\n", port);
     printf("Document root: %s\n", document_root_path);
-    printf("-------------------------\n");
     loop(port);
     clean_exit(EXIT_SUCCESS, NULL);
     return 0;
