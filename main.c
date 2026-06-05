@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -20,7 +21,7 @@
 #define MAX_EVENTS 10
 
 volatile bool sigint_receaved = false;
-char *doc_root_path = NULL;
+char *document_root_path = NULL;
 
 DIR *document_root = NULL;
 int server_fd = -1;
@@ -154,7 +155,7 @@ void setup_epoll(bool cloexec)
         clean_exit(EXIT_FAILURE, "(setup) epoll_ctl error");
 }
 
-inline void register_client(void)
+void register_client(void)
 {
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);
@@ -221,15 +222,34 @@ void send_response_error(int client_fd, int response_code)
             perror("Wrong reponse code");
             response_choosen = response_501;
     }
+    printf("Sent error code: %d\n", response_code);
     write(client_fd, response_choosen, strlen(response_choosen));
 }
 
-inline void handle_http_request(int client_fd, char *buffer)
+const char *get_mime_type(const char *path)
+{
+    const char *dot = strrchr(path, '.');
+    if (dot == NULL)
+        return "text/plain";
+    // clang-format off
+    if (strcmp(dot, ".html") == 0 || strcmp(dot, ".htm") == 0) return "text/html";
+    if (strcmp(dot, ".css") == 0) return "text/css";
+    if (strcmp(dot, ".js") == 0) return "application/javascript";
+    if (strcmp(dot, ".jpg") == 0 || strcmp(dot, ".jpeg") == 0) return "image/jpeg";
+    if (strcmp(dot, ".png") == 0) return "image/png";
+    if (strcmp(dot, ".gif") == 0) return "image/gif";
+    if (strcmp(dot, ".txt") == 0) return "text/plain";
+    // clang-format on
+
+    return "application/octet-stream";
+}
+
+void handle_http_request(const int client_fd, const char *request)
 {
     char method[16];
     char path[256];
     char protocol[16];
-    if (sscanf(buffer, "%15s %255s %15s", method, path, protocol) != 3)
+    if (sscanf(request, "%15s %255s %15s", method, path, protocol) != 3)
     {
         send_response_error(client_fd, 400);
         return;
@@ -246,18 +266,42 @@ inline void handle_http_request(int client_fd, char *buffer)
         return;
     }
     if (strcmp(path, "/") == 0)
-        strcpy(path, "/index.html");
+    {
+        snprintf(path, sizeof(path), "%s", "/index.html");
+    }
     char file_path[512];
-    snprintf(file_path, sizeof(file_path), "%s%s", doc_root_path, path);
+    snprintf(file_path, sizeof(file_path), "%s%s", document_root_path, path);
     FILE *file = fopen(file_path, "rb");
-    struct stat sb;
-    //todo: fstat, sendfile, content-length = header_len + file_len
-    //      write header in client_fd socket, then sendfile
+    if (!file)
+    {
+        printf("File %s not found\n", file_path);
+        send_response_error(client_fd, 404);
+        return;
+    }
+    int file_fd = fileno(file);
+    struct stat file_stat;
+    if (fstat(file_fd, &file_stat) == -1)
+    {
+        send_response_error(client_fd, 500);
+        goto close;
+    }
+    char header_buffer[512];
+    const char *mime_type = get_mime_type(file_path);
+    int header_len = snprintf(header_buffer, sizeof(header_buffer),
+                              "HTTP/1.1 200 OK\r\n"
+                              "Content-Type: %s\r\n"
+                              "Content-Length: %ld\r\n"
+                              "Connection: close\r\n"
+                              "\r\n",
+                              mime_type, file_stat.st_size);
+    printf("SENDING:\n%s", header_buffer);
+    write(client_fd, header_buffer, header_len);
+    sendfile(client_fd, file_fd, NULL, file_stat.st_size);
+close:
     fclose(file);
-    return;
 }
 
-inline void process_request(int client_fd)
+void process_request(int client_fd)
 {
     const int buffer_size = 4096;
     char buffer[buffer_size];
@@ -279,7 +323,7 @@ close:
     close(client_fd);
 }
 
-inline void loop(int port)
+void loop(int port)
 {
     struct epoll_event events[MAX_EVENTS];
     int nfds;
@@ -320,7 +364,6 @@ int main(int argc, char *argv[])
     sa.sa_handler = sigint_handler;
     sigaction(SIGINT, &sa, NULL);
     int port;
-    char *document_root_path;
     parse_argv(argc, argv, &port, &document_root_path);
     open_document_root(document_root_path);
     setup_server_socket(port);
