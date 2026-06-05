@@ -298,6 +298,13 @@ void handle_http_request(const int client_fd, const char *request)
         send_response_error(client_fd, 500);
         goto close;
     }
+    if (S_ISDIR(file_stat.st_mode))
+    {
+        printf("File %s is a directory\n", file_path);
+        send_response_error(client_fd, 403);
+        goto close;
+    }
+
     char header_buffer[512];
     const char *mime_type = get_mime_type(file_path);
     int header_len = snprintf(header_buffer, sizeof(header_buffer),
