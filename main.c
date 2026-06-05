@@ -2,6 +2,7 @@
 #include <dirent.h>
 #include <err.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -20,17 +21,19 @@
 
 #define MAX_EVENTS 10
 
-volatile bool sigint_receaved = false;
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
+
+volatile sig_atomic_t sigint_received = false;
 char *document_root_path = NULL;
 
-DIR *document_root = NULL;
+// DIR *document_root = NULL;
 int server_fd = -1;
 int epoll_fd = -1;
 
 void print_spinner(int port)
 {
     static uint8_t i = 0;
-    const char *const dots[] = {
+    const char *const frames[] = {
         "|>    |", // 0
         "| >   |", // 1
         "|  >  |", // 2
@@ -44,20 +47,18 @@ void print_spinner(int port)
         "|<    |", // 10
         "|^    |", // 11
     };
-    printf("\rListening on %5d %s", port, dots[i % 12]);
+    printf("\rListening on %5d %s", port, frames[i % ARRAY_SIZE(frames)]);
     fflush(stdout);
     i++;
 }
 
 void sigint_handler(int signum) // NOLINT
 {
-    sigint_receaved = true;
+    sigint_received = true;
 }
 
 void clean_exit(int status, char *msg)
 {
-    if (document_root != NULL)
-        closedir(document_root);
     if (server_fd != -1)
         close(server_fd);
     if (epoll_fd != -1)
@@ -112,11 +113,26 @@ void parse_argv(int argc, char *const *argv, int *ret_port, char **ret_dir)
     }
 }
 
-void open_document_root(char *path)
+void check_document_root(void)
 {
-    document_root = opendir(path);
-    if (document_root == NULL)
-        clean_exit(EXIT_FAILURE, "opendir error");
+    struct stat sb;
+    if (stat(document_root_path, &sb) != 0)
+        clean_exit(EXIT_FAILURE, "stat error");
+    if (!S_ISDIR(sb.st_mode))
+    {
+        fprintf(stderr, "%s is not a directory\n", document_root_path);
+        clean_exit(EXIT_FAILURE, NULL);
+    }
+}
+
+void normalize_path(void)
+{
+    size_t len = strlen(document_root_path);
+    while (len  >= 2 && document_root_path[len - 1] == '/')
+    {
+        document_root_path[len - 1] = '\0';
+        len--;
+    }
 }
 
 void setup_server_socket(int port)
@@ -147,7 +163,7 @@ void setup_epoll(bool cloexec)
     epoll_fd = epoll_create1(flags);
     if (unlikely(epoll_fd) == -1)
         clean_exit(EXIT_FAILURE, "epoll_create1 error");
-    struct epoll_event ev;
+    struct epoll_event ev = {0};
     ev.events = EPOLLIN;
     ev.data.fd = server_fd;
     const int ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &ev);
@@ -240,7 +256,6 @@ const char *get_mime_type(const char *path)
     if (strcmp(dot, ".gif") == 0) return "image/gif";
     if (strcmp(dot, ".txt") == 0) return "text/plain; charset=utf-8";
     // clang-format on
-    // return "text/plain";
     return "application/octet-stream";
 }
 
@@ -254,7 +269,6 @@ void handle_http_request(const int client_fd, const char *request)
         send_response_error(client_fd, 400);
         return;
     }
-    // printf("Path: %s\n", path);
     if (strcmp(method, "GET") != 0)
     {
         send_response_error(client_fd, 501);
@@ -271,14 +285,13 @@ void handle_http_request(const int client_fd, const char *request)
     }
     char file_path[512];
     snprintf(file_path, sizeof(file_path), "%s%s", document_root_path, path);
-    FILE *file = fopen(file_path, "rb");
-    if (!file)
+    int file_fd = open(file_path, O_RDONLY);
+    if (file_fd == -1)
     {
         printf("File %s not found\n", file_path);
         send_response_error(client_fd, 404);
         return;
     }
-    int file_fd = fileno(file);
     struct stat file_stat;
     if (fstat(file_fd, &file_stat) == -1)
     {
@@ -287,7 +300,6 @@ void handle_http_request(const int client_fd, const char *request)
     }
     char header_buffer[512];
     const char *mime_type = get_mime_type(file_path);
-    // printf("Path: %s, corresponding mime: %s\n", path, mime_type);
     int header_len = snprintf(header_buffer, sizeof(header_buffer),
                               "HTTP/1.1 200 OK\r\n"
                               "Content-Type: %s\r\n"
@@ -295,11 +307,10 @@ void handle_http_request(const int client_fd, const char *request)
                               "Connection: close\r\n"
                               "\r\n",
                               mime_type, file_stat.st_size);
-    // printf("SENDING:\n%s", header_buffer);
     write(client_fd, header_buffer, header_len);
     sendfile(client_fd, file_fd, NULL, file_stat.st_size);
 close:
-    fclose(file);
+    close(file_fd);
 }
 
 void process_request(int client_fd)
@@ -315,12 +326,13 @@ void process_request(int client_fd)
     }
     if (bytes_read == 0)
     {
-        send_response_error(client_fd, 400);
+        printf("client disconnected\n");
         goto close;
     }
     buffer[bytes_read] = '\0';
     handle_http_request(client_fd, buffer);
 close:
+    // epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL); // not needed - close will do the job
     close(client_fd);
 }
 
@@ -332,7 +344,7 @@ void loop(int port)
     {
         print_spinner(port);
         nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, 300);
-        if (sigint_receaved)
+        if (sigint_received)
             break;
         if (nfds == -1)
         {
@@ -346,13 +358,9 @@ void loop(int port)
         for (int i = 0; i < nfds; i++)
         {
             if (events[i].data.fd == server_fd)
-            {
                 register_client();
-            }
             else
-            {
                 process_request(events[i].data.fd);
-            }
         }
     }
 }
@@ -364,9 +372,11 @@ int main(int argc, char *argv[])
     sa.sa_flags = 0;
     sa.sa_handler = sigint_handler;
     sigaction(SIGINT, &sa, NULL);
+    signal(SIGPIPE, SIG_IGN);
     int port;
     parse_argv(argc, argv, &port, &document_root_path);
-    open_document_root(document_root_path);
+    normalize_path();
+    check_document_root();
     setup_server_socket(port);
     setup_epoll(false);
 
