@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <arpa/inet.h>
 #include <dirent.h>
 #include <err.h>
 #include <errno.h>
@@ -13,6 +14,7 @@
 #include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef unlikely
@@ -31,7 +33,7 @@ int server_fd = -1;
 int epoll_fd = -1;
 FILE *log_file = NULL;
 
-void print_spinner(int port)
+void print_spinner(const int port)
 {
     static uint8_t i = 0;
     const char *const frames[] = {
@@ -58,7 +60,7 @@ void sigint_handler(int signum) // NOLINT
     sigint_received = true;
 }
 
-void clean_exit(int status, char *msg)
+void clean_exit(const int status, const char *msg)
 {
     if (server_fd != -1)
         close(server_fd);
@@ -72,7 +74,7 @@ void clean_exit(int status, char *msg)
     exit(status);
 }
 
-void parse_argv(int argc, char *const *argv, int *ret_port, char **ret_dir)
+void parse_argv(const int argc, char *const *argv, int *ret_port, char **ret_dir)
 {
     if (!ret_port || !ret_dir)
         errx(EXIT_FAILURE, "parse_argv requires non-null arguments");
@@ -138,7 +140,7 @@ void normalize_path(void)
     }
 }
 
-void setup_server_socket(int port)
+void setup_server_socket(const int port)
 {
     int ret;
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -160,7 +162,7 @@ void setup_server_socket(int port)
         clean_exit(EXIT_FAILURE, "listen error");
 }
 
-void setup_epoll(bool cloexec)
+void setup_epoll(const bool cloexec)
 {
     const int flags = cloexec ? EPOLL_CLOEXEC : 0;
     epoll_fd = epoll_create1(flags);
@@ -187,24 +189,42 @@ void ensure_log_file_integrity(void)
     struct stat path_stat;
     if (fstat(fileno(log_file), &fd_stat) == -1)
     {
-        perror("fstat error\n");
+        perror("fstat error");
         return;
     }
     if (stat(log_path, &path_stat) == -1 || fd_stat.st_ino != path_stat.st_ino)
     {
-        fprintf(stderr, "Reopening log file\n");
+        printf("Reopening log file\n");
         fclose(log_file);
         open_or_create_log_file();
     }
 }
 
-void write_to_log(const char* log_entry)
+void write_to_log(const int client_fd, const char *method, const char *path, const int status_code)
 {
+    static size_t log_id = 1;
+    const time_t raw_time = time(NULL);
+    struct tm *time_info = localtime(&raw_time);
+    char date_buffer[11];
+    char time_buffer[9];
+    strftime(date_buffer, sizeof(date_buffer), "%Y-%m-%d", time_info);
+    strftime(time_buffer, sizeof(time_buffer), "%H:%M:%S", time_info);
+    char ip_buffer[INET_ADDRSTRLEN] = "unknown";
+    struct sockaddr_in peer_addr;
+    socklen_t peer_len = sizeof(peer_addr);
+    if (getpeername(client_fd, &peer_addr, &peer_len) == 0)
+        inet_ntop(AF_INET, &peer_addr.sin_addr, ip_buffer, sizeof(ip_buffer));
+
     flockfile(log_file);
-
     ensure_log_file_integrity();
-    fprintf(log_file, "%s", log_entry);
-
+    fprintf(log_file, "%-6zu | %-10s | %-8s | %-15s | %-5.10s | %-30.255s | %d\n", //
+            log_id++, //
+            date_buffer, //
+            time_buffer, //
+            ip_buffer, //
+            method ? method : "", //
+            path ? path : "", //
+            status_code);
     fflush(log_file);
     funlockfile(log_file);
 }
@@ -227,7 +247,7 @@ void register_client(void)
         clean_exit(EXIT_FAILURE, "(register client) epoll_ctl error");
 }
 
-void send_response_error_code(int client_fd, int response_code)
+void send_response_error_code(const int client_fd, const int response_code, const char *method, const char *path)
 {
     const char *status_line;
     const char *header_common_content = //
@@ -243,14 +263,16 @@ void send_response_error_code(int client_fd, int response_code)
         case 404: status_line = "HTTP/1.1 404 Not Found\r\n"; break;
         case 500: status_line = "HTTP/1.1 500 Internal Server Error\r\n"; break;
         case 501: status_line = "HTTP/1.1 501 Not implemented\r\n"; break;
+        case 505: status_line = "HTTP/1.1 505 HTTP Version Not Supported\r\n"; break;
         default:
-            fprintf(stderr, "Wrong reponse code");
-            status_line = "HTTP/1.1 400 Bad Request\r\n";
+            fprintf(stderr, "Wrong reponse code\n");
+            status_line = "HTTP/1.1 500 Internal Server Error\r\n";
     }
     // clang-format on
     int response_len = snprintf(response, sizeof(response), "%s%s", status_line, header_common_content);
     printf("Sent error code: %d\n", response_code);
     write(client_fd, response, response_len);
+    write_to_log(client_fd, method, path, response_code);
 }
 
 const char *get_mime_type(const char *path)
@@ -260,21 +282,21 @@ const char *get_mime_type(const char *path)
         return "text/plain; charset=utf-8";
     // clang-format off
     if (strcmp(dot, ".html") == 0 || strcmp(dot, ".htm") == 0) return "text/html; charset=utf-8";
-    if (strcmp(dot, ".css") == 0) return "text/css; charset=utf-8";
-    if (strcmp(dot, ".js") == 0) return "application/javascript; charset=utf-8";
+    if (strcmp(dot, ".css") == 0)                              return "text/css; charset=utf-8";
+    if (strcmp(dot, ".js") == 0)                               return "application/javascript; charset=utf-8";
     if (strcmp(dot, ".jpg") == 0 || strcmp(dot, ".jpeg") == 0) return "image/jpeg";
-    if (strcmp(dot, ".png") == 0) return "image/png";
-    if (strcmp(dot, ".gif") == 0) return "image/gif";
-    if (strcmp(dot, ".txt") == 0) return "text/plain; charset=utf-8";
+    if (strcmp(dot, ".png") == 0)                              return "image/png";
+    if (strcmp(dot, ".gif") == 0)                              return "image/gif";
+    if (strcmp(dot, ".txt") == 0)                              return "text/plain; charset=utf-8";
     // clang-format on
     return "application/octet-stream";
 }
 
-void handle_get_request(const int client_fd, char *path, const size_t path_max_len)
+void handle_get_request(const int client_fd, const char *method, char *path, const size_t path_max_len)
 {
     if (strstr(path, "..") != NULL)
     {
-        send_response_error_code(client_fd, 403);
+        send_response_error_code(client_fd, 403, method, path);
         return;
     }
     if (strcmp(path, "/") == 0)
@@ -284,20 +306,20 @@ void handle_get_request(const int client_fd, char *path, const size_t path_max_l
     int file_fd = open(file_path, O_RDONLY);
     if (file_fd == -1)
     {
-        printf("File %s not found\n", file_path);
-        send_response_error_code(client_fd, 404);
+        // printf("File %s not found\n", file_path);
+        send_response_error_code(client_fd, 404, method, path);
         return;
     }
     struct stat file_stat;
     if (fstat(file_fd, &file_stat) == -1)
     {
-        send_response_error_code(client_fd, 500);
+        send_response_error_code(client_fd, 500, method, path);
         goto close_file;
     }
     if (S_ISDIR(file_stat.st_mode))
     {
-        printf("File %s is a directory\n", file_path);
-        send_response_error_code(client_fd, 403);
+        // printf("File %s is a directory\n", file_path);
+        send_response_error_code(client_fd, 403, method, path);
         goto close_file;
     }
 
@@ -311,47 +333,48 @@ void handle_get_request(const int client_fd, char *path, const size_t path_max_l
                               "\r\n",
                               mime_type, file_stat.st_size);
     write(client_fd, header_buffer, header_len);
+    // todo: write to log
+    write_to_log(client_fd, method, path, 200);
     sendfile(client_fd, file_fd, NULL, file_stat.st_size);
 close_file:
     close(file_fd);
 }
 
-void process_request(int client_fd)
+void process_request(const int client_fd)
 {
     const int buffer_size = 4096;
     char request_buffer[buffer_size];
     char method[16];
     const size_t path_max_len = 256;
     char path[path_max_len];
-    char protocol[16];
+    char protocol[16] = {0};
     ssize_t bytes_read = read(client_fd, request_buffer, buffer_size - 1);
     if (unlikely(bytes_read == -1))
     {
         perror("read error");
-        send_response_error_code(client_fd, 500);
+        send_response_error_code(client_fd, 500, NULL, NULL);
         goto close_client;
     }
     if (bytes_read == 0)
-    {
-        printf("Client disconnected\n");
         goto close_client;
-    }
     request_buffer[bytes_read] = '\0';
     if (sscanf(request_buffer, "%15s %255s %15s", method, path, protocol) != 3)
     {
-        send_response_error_code(client_fd, 400);
+        send_response_error_code(client_fd, 400, NULL, NULL);
         goto close_client;
     }
+    if (strcmp(protocol, "HTTP/1.1") != 0)
+        send_response_error_code(client_fd, 505, method, path);
     if (strcmp(method, "GET") == 0)
-        handle_get_request(client_fd, path, path_max_len);
+        handle_get_request(client_fd, method, path, path_max_len);
     else
-        send_response_error_code(client_fd, 501);
+        send_response_error_code(client_fd, 501, method, path);
 close_client:
     // epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL); // not needed - close will do the job
     close(client_fd);
 }
 
-void loop(int port)
+void loop(const int port)
 {
     struct epoll_event events[MAX_EVENTS];
     int nfds;
