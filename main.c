@@ -34,20 +34,20 @@ void print_spinner(int port)
 {
     static uint8_t i = 0;
     const char *const frames[] = {
-        "|>    |", // 0
-        "| >   |", // 1
-        "|  >  |", // 2
-        "|   > |", // 3
-        "|    >|", // 4
-        "|    ^|", // 5
-        "|    <|", // 6
-        "|   < |", // 7
-        "|  <  |", // 8
-        "| <   |", // 9
-        "|<    |", // 10
-        "|^    |", // 11
+        "|>    |", //
+        "| >   |", //
+        "|  >  |", //
+        "|   > |", //
+        "|    >|", //
+        "|    ^|", //
+        "|    <|", //
+        "|   < |", //
+        "|  <  |", //
+        "| <   |", //
+        "|<    |", //
+        "|^    |", //
     };
-    printf("\rListening on %5d %s", port, frames[i % ARRAY_SIZE(frames)]);
+    printf("\rListening on %-5d %s", port, frames[i % ARRAY_SIZE(frames)]);
     fflush(stdout);
     i++;
 }
@@ -128,7 +128,7 @@ void check_document_root(void)
 void normalize_path(void)
 {
     size_t len = strlen(document_root_path);
-    while (len  >= 2 && document_root_path[len - 1] == '/')
+    while (len >= 2 && document_root_path[len - 1] == '/')
     {
         document_root_path[len - 1] = '\0';
         len--;
@@ -189,7 +189,7 @@ void register_client(void)
         clean_exit(EXIT_FAILURE, "(register client) epoll_ctl error");
 }
 
-void send_response_error(int client_fd, int response_code)
+void send_response_error_code(int client_fd, int response_code)
 {
     const char *response_400 = //
         "HTTP/1.1 400 Bad Request\r\n"
@@ -259,50 +259,35 @@ const char *get_mime_type(const char *path)
     return "application/octet-stream";
 }
 
-void handle_http_request(const int client_fd, const char *request)
+void handle_get_request(const int client_fd, char *path, const size_t path_max_len)
 {
-    char method[16];
-    char path[256];
-    char protocol[16];
-    if (sscanf(request, "%15s %255s %15s", method, path, protocol) != 3)
-    {
-        send_response_error(client_fd, 400);
-        return;
-    }
-    if (strcmp(method, "GET") != 0)
-    {
-        send_response_error(client_fd, 501);
-        return;
-    }
     if (strstr(path, "..") != NULL)
     {
-        send_response_error(client_fd, 403);
+        send_response_error_code(client_fd, 403);
         return;
     }
     if (strcmp(path, "/") == 0)
-    {
-        snprintf(path, sizeof(path), "%s", "/index.html");
-    }
+        snprintf(path, path_max_len, "%s", "/index.html");
     char file_path[512];
     snprintf(file_path, sizeof(file_path), "%s%s", document_root_path, path);
     int file_fd = open(file_path, O_RDONLY);
     if (file_fd == -1)
     {
         printf("File %s not found\n", file_path);
-        send_response_error(client_fd, 404);
+        send_response_error_code(client_fd, 404);
         return;
     }
     struct stat file_stat;
     if (fstat(file_fd, &file_stat) == -1)
     {
-        send_response_error(client_fd, 500);
-        goto close;
+        send_response_error_code(client_fd, 500);
+        goto close_file;
     }
     if (S_ISDIR(file_stat.st_mode))
     {
         printf("File %s is a directory\n", file_path);
-        send_response_error(client_fd, 403);
-        goto close;
+        send_response_error_code(client_fd, 403);
+        goto close_file;
     }
 
     char header_buffer[512];
@@ -316,29 +301,41 @@ void handle_http_request(const int client_fd, const char *request)
                               mime_type, file_stat.st_size);
     write(client_fd, header_buffer, header_len);
     sendfile(client_fd, file_fd, NULL, file_stat.st_size);
-close:
+close_file:
     close(file_fd);
 }
 
 void process_request(int client_fd)
 {
     const int buffer_size = 4096;
-    char buffer[buffer_size];
-    ssize_t bytes_read = read(client_fd, buffer, buffer_size - 1);
+    char request_buffer[buffer_size];
+    char method[16];
+    const size_t path_max_len = 256;
+    char path[path_max_len];
+    char protocol[16];
+    ssize_t bytes_read = read(client_fd, request_buffer, buffer_size - 1);
     if (unlikely(bytes_read == -1))
     {
         perror("read error");
-        send_response_error(client_fd, 500);
-        goto close;
+        send_response_error_code(client_fd, 500);
+        goto close_client;
     }
     if (bytes_read == 0)
     {
-        printf("client disconnected\n");
-        goto close;
+        printf("Client disconnected\n");
+        goto close_client;
     }
-    buffer[bytes_read] = '\0';
-    handle_http_request(client_fd, buffer);
-close:
+    request_buffer[bytes_read] = '\0';
+    if (sscanf(request_buffer, "%15s %255s %15s", method, path, protocol) != 3)
+    {
+        send_response_error_code(client_fd, 400);
+        goto close_client;
+    }
+    if (strcmp(method, "GET") == 0)
+        handle_get_request(client_fd, path, path_max_len);
+    else
+        send_response_error_code(client_fd, 501);
+close_client:
     // epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL); // not needed - close will do the job
     close(client_fd);
 }
