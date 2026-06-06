@@ -191,55 +191,36 @@ void register_client(void)
 
 void send_response_error_code(int client_fd, int response_code)
 {
-    const char *response_400 = //
-        "HTTP/1.1 400 Bad Request\r\n"
+    const char *status_line;
+    const char *header_common_content = //
         "Content-Length: 0\r\n"
         "Connection: close\r\n"
         "\r\n";
-    const char *response_403 = //
-        "HTTP/1.1 403 Forbidden\r\n"
-        "Content-Length: 0\r\n"
-        "Connection: close\r\n"
-        "\r\n";
-    const char *response_404 = //
-        "HTTP/1.1 404 Not Found\r\n"
-        "Content-Length: 0\r\n"
-        "Connection: close\r\n"
-        "\r\n";
-    const char *response_500 = //
-        "HTTP/1.1 500 Internal Server Error\r\n"
-        "Content-Length: 0\r\n"
-        "Connection: close\r\n"
-        "\r\n";
-    const char *response_501 = //
-        "HTTP/1.1 501 Not implemented\r\n"
-        "Content-Length: 0\r\n"
-        "Connection: close\r\n"
-        "\r\n";
-    const char *response_choosen = NULL;
+    char response[512];
     switch (response_code)
     {
         case 400:
-            response_choosen = response_400;
+            status_line = "HTTP/1.1 400 Bad Request\r\n";
             break;
         case 403:
-            response_choosen = response_403;
+            status_line = "HTTP/1.1 403 Forbidden\r\n";
             break;
         case 404:
-            response_choosen = response_404;
+            status_line = "HTTP/1.1 404 Not Found\r\n";
             break;
         case 500:
-            response_choosen = response_500;
+            status_line = "HTTP/1.1 500 Internal Server Error\r\n";
             break;
         case 501:
-            response_choosen = response_501;
+            status_line = "HTTP/1.1 501 Not implemented\r\n";
             break;
         default:
-            perror("Wrong reponse code");
-            response_choosen = response_501;
+            fprintf(stderr, "Wrong reponse code");
+            status_line = "HTTP/1.1 400 Bad Request\r\n";
     }
+    int response_len = snprintf(response, sizeof(response), "%s%s", status_line, header_common_content);
     printf("Sent error code: %d\n", response_code);
-    write(client_fd, response_choosen, strlen(response_choosen));
+    write(client_fd, response, response_len);
 }
 
 const char *get_mime_type(const char *path)
