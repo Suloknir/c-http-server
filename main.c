@@ -25,10 +25,11 @@
 
 volatile sig_atomic_t sigint_received = false;
 char *document_root_path = NULL;
+const char *log_path = "server.log";
 
-// DIR *document_root = NULL;
 int server_fd = -1;
 int epoll_fd = -1;
+FILE *log_file = NULL;
 
 void print_spinner(int port)
 {
@@ -63,6 +64,8 @@ void clean_exit(int status, char *msg)
         close(server_fd);
     if (epoll_fd != -1)
         close(epoll_fd);
+    if (log_file != NULL)
+        fclose(log_file);
 
     if (msg != NULL)
         perror(msg);
@@ -168,7 +171,42 @@ void setup_epoll(bool cloexec)
     ev.data.fd = server_fd;
     const int ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &ev);
     if (unlikely(ret == -1))
-        clean_exit(EXIT_FAILURE, "(setup) epoll_ctl error");
+        clean_exit(EXIT_FAILURE, "epoll_ctl error");
+}
+
+void open_or_create_log_file(void)
+{
+    log_file = fopen(log_path, "a");
+    if (unlikely(log_file == NULL))
+        clean_exit(EXIT_FAILURE, "fopen error");
+}
+
+void ensure_log_file_integrity(void)
+{
+    struct stat fd_stat;
+    struct stat path_stat;
+    if (fstat(fileno(log_file), &fd_stat) == -1)
+    {
+        perror("fstat error\n");
+        return;
+    }
+    if (stat(log_path, &path_stat) == -1 || fd_stat.st_ino != path_stat.st_ino)
+    {
+        fprintf(stderr, "Reopening log file\n");
+        fclose(log_file);
+        open_or_create_log_file();
+    }
+}
+
+void write_to_log(const char* log_entry)
+{
+    flockfile(log_file);
+
+    ensure_log_file_integrity();
+    fprintf(log_file, "%s", log_entry);
+
+    fflush(log_file);
+    funlockfile(log_file);
 }
 
 void register_client(void)
@@ -197,27 +235,19 @@ void send_response_error_code(int client_fd, int response_code)
         "Connection: close\r\n"
         "\r\n";
     char response[512];
+    // clang-format off
     switch (response_code)
     {
-        case 400:
-            status_line = "HTTP/1.1 400 Bad Request\r\n";
-            break;
-        case 403:
-            status_line = "HTTP/1.1 403 Forbidden\r\n";
-            break;
-        case 404:
-            status_line = "HTTP/1.1 404 Not Found\r\n";
-            break;
-        case 500:
-            status_line = "HTTP/1.1 500 Internal Server Error\r\n";
-            break;
-        case 501:
-            status_line = "HTTP/1.1 501 Not implemented\r\n";
-            break;
+        case 400: status_line = "HTTP/1.1 400 Bad Request\r\n"; break;
+        case 403: status_line = "HTTP/1.1 403 Forbidden\r\n"; break;
+        case 404: status_line = "HTTP/1.1 404 Not Found\r\n"; break;
+        case 500: status_line = "HTTP/1.1 500 Internal Server Error\r\n"; break;
+        case 501: status_line = "HTTP/1.1 501 Not implemented\r\n"; break;
         default:
             fprintf(stderr, "Wrong reponse code");
             status_line = "HTTP/1.1 400 Bad Request\r\n";
     }
+    // clang-format on
     int response_len = snprintf(response, sizeof(response), "%s%s", status_line, header_common_content);
     printf("Sent error code: %d\n", response_code);
     write(client_fd, response, response_len);
@@ -364,6 +394,7 @@ int main(int argc, char *argv[])
     check_document_root();
     setup_server_socket(port);
     setup_epoll(false);
+    open_or_create_log_file();
 
     printf("Port: %d\n", port);
     printf("Document root: %s\n", document_root_path);
