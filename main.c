@@ -217,11 +217,11 @@ void write_to_log(const int client_fd, const char *method, const char *path, con
 
     flockfile(log_file);
     ensure_log_file_integrity();
-    fprintf(log_file, "%-6zu | %-10s | %-8s | %-15s | %-5.10s | %-30.255s | %d\n", //
+    fprintf(log_file, "%-6zu | %-10s | %-8s | %-*s | %-5.10s | %-30.255s | %d\n", //
             log_id++, //
             date_buffer, //
             time_buffer, //
-            ip_buffer, //
+            INET_ADDRSTRLEN - 1, ip_buffer, //
             method ? method : "", //
             path ? path : "", //
             status_code);
@@ -270,7 +270,7 @@ void send_response_error_code(const int client_fd, const int response_code, cons
     }
     // clang-format on
     int response_len = snprintf(response, sizeof(response), "%s%s", status_line, header_common_content);
-    printf("Sent error code: %d\n", response_code);
+    // printf("Sent error code: %d\n", response_code);
     write(client_fd, response, response_len);
     write_to_log(client_fd, method, path, response_code);
 }
