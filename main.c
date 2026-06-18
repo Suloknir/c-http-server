@@ -23,11 +23,9 @@
 
 #define MAX_EVENTS 10
 
-#define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
-
 volatile sig_atomic_t sigint_received = false;
 char *document_root_path = NULL;
-const char *log_path = "server.log";
+const char *log_path = "./server.log";
 
 int server_fd = -1;
 int epoll_fd = -1;
@@ -50,7 +48,8 @@ void print_spinner(const int port)
         "|<    |", //
         "|^    |", //
     };
-    printf("\rListening on %-5d %s", port, frames[i % ARRAY_SIZE(frames)]);
+    const int total_frames = sizeof(frames) / sizeof(frames[0]);
+    printf("\rListening on %-5d %s", port, frames[i % total_frames]);
     fflush(stdout);
     i++;
 }
@@ -74,18 +73,24 @@ void clean_exit(const int status, const char *msg)
     exit(status);
 }
 
-void parse_argv(const int argc, char *const *argv, int *ret_port, char **ret_dir)
+void parse_argv(const int argc, char *const *argv, int *ret_port, char **ret_dir, bool *ret_daemon)
 {
     if (!ret_port || !ret_dir)
-        errx(EXIT_FAILURE, "parse_argv requires non-null arguments");
+        errx(EXIT_FAILURE, "parse_argv requires 'port' and 'dir' to be non-null arguments");
+    *ret_port = -1;
+    *ret_dir = NULL;
     bool port_flag = false;
     bool dir_flag = false;
+    bool daemon_flag = false;
     opterr = 0;
     int ret;
-    while ((ret = getopt(argc, argv, "d:p:")) != -1)
+    while ((ret = getopt(argc, argv, "ad:p:")) != -1)
     {
         switch (ret)
         {
+            case 'a':
+                daemon_flag = true;
+                break;
             case 'd':
                 dir_flag = true;
                 *ret_dir = optarg;
@@ -116,6 +121,8 @@ void parse_argv(const int argc, char *const *argv, int *ret_port, char **ret_dir
         fprintf(stderr, "Usage: %s -p [port] -d [directory]\n", argv[0]);
         exit(EXIT_FAILURE);
     }
+    if (ret_daemon)
+        *ret_daemon = daemon_flag;
 }
 
 void check_document_root(void)
@@ -236,7 +243,7 @@ void register_client(void)
     int client_fd = accept(server_fd, &client_addr, &addr_len);
     if (client_fd == -1)
     {
-        perror("(register) accept error");
+        perror("(register_client) accept error");
         return;
     }
     struct epoll_event ev;
@@ -244,7 +251,7 @@ void register_client(void)
     ev.data.fd = client_fd;
     const int ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev);
     if (unlikely(ret == -1))
-        clean_exit(EXIT_FAILURE, "(register client) epoll_ctl error");
+        clean_exit(EXIT_FAILURE, "(register_client) epoll_ctl error");
 }
 
 void send_response_error_code(const int client_fd, const int response_code, const char *method, const char *path)
@@ -306,7 +313,6 @@ void handle_get_request(const int client_fd, const char *method, char *path, con
     int file_fd = open(file_path, O_RDONLY);
     if (file_fd == -1)
     {
-        // printf("File %s not found\n", file_path);
         send_response_error_code(client_fd, 404, method, path);
         return;
     }
@@ -333,7 +339,6 @@ void handle_get_request(const int client_fd, const char *method, char *path, con
                               "\r\n",
                               mime_type, file_stat.st_size);
     write(client_fd, header_buffer, header_len);
-    // todo: write to log
     write_to_log(client_fd, method, path, 200);
     sendfile(client_fd, file_fd, NULL, file_stat.st_size);
 close_file:
@@ -374,14 +379,21 @@ close_client:
     close(client_fd);
 }
 
-void loop(const int port)
+void loop(const int port, const bool is_daemon)
 {
     struct epoll_event events[MAX_EVENTS];
     int nfds;
     for (;;)
     {
-        print_spinner(port);
-        nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, 300);
+        if (is_daemon)
+            nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+        else
+        {
+            print_spinner(port);
+            const int max_wait_ms = 300;
+            nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, max_wait_ms);
+        }
+
         if (sigint_received)
             break;
         if (nfds == -1)
@@ -412,7 +424,17 @@ int main(int argc, char *argv[])
     sigaction(SIGINT, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
     int port;
-    parse_argv(argc, argv, &port, &document_root_path);
+    bool is_daemon;
+    parse_argv(argc, argv, &port, &document_root_path, &is_daemon);
+    if (is_daemon)
+    {
+        printf("Server will continue as a daemon process\n");
+        bool keep_working_directory = true;
+        bool keep_standard_streams_open = false;
+        if (daemon(keep_working_directory, keep_standard_streams_open) != 0)
+            err(EXIT_FAILURE, "daemon error\n");
+    }
+
     normalize_path();
     check_document_root();
     setup_server_socket(port);
@@ -421,7 +443,7 @@ int main(int argc, char *argv[])
 
     printf("Port: %d\n", port);
     printf("Document root: %s\n", document_root_path);
-    loop(port);
+    loop(port, is_daemon);
     clean_exit(EXIT_SUCCESS, NULL);
     return 0;
 }
