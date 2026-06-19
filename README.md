@@ -15,13 +15,36 @@ A fast, single-threaded, event-driven HTTP/1.1 server written in pure C. This pr
 * **Graceful Shutdown:** Intercepts `SIGINT` signals to properly clean up and close all active file descriptors before exiting.
 * **CLI Spinner:** Provides visual feedback in the terminal when running in the foreground.
 
-## Prerequisites
+## Requirements
 * Linux operating system (relies heavily on Linux-specific APIs: `<sys/epoll.h>` and `<sys/sendfile.h>`)
 * GCC compiler
 ## Build Instructions
 
 Compile the server directly from the source code using the following command:
-
-```
+```bash
 gcc -std=c17 -Wall -Wextra -O2 main.c -o http_daemon_server
 ```
+
+## Usage
+To start the server, you must provide a valid port number and a document root directory.
+```bash
+./http_daemon_server -p <port> -d <document_root> [-a]
+```
+### Options:
+* `-p`: Port to listen on (0- 65535)
+* `-d`: Document root directory to serve files from 
+* `-a`: *(optional)* Run the server as a background daemon process 
+
+### Examples:
+1. Run the server on port 8080 serving files from the ./test_site directory:
+```bash
+./http_daemon_server -p 8080 -d ./test_site
+```
+
+2. Run the server in the background:
+```bash
+./http_daemon_server -p 8080 -d ./test_site -a
+```
+To gracefully stop the server running in the foreground, simply press Ctrl+C.
+
+
