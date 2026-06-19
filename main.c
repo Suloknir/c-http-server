@@ -54,9 +54,10 @@ void print_spinner(const int port)
     i++;
 }
 
-void sigint_handler(int signum) // NOLINT
+void sigint_handler(int signum)
 {
     sigint_received = true;
+    (void)signum; // to silence the compiler
 }
 
 void clean_exit(const int status, const char *msg)
