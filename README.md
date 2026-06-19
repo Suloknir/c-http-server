@@ -36,15 +36,31 @@ To start the server, you must provide a valid port number and a document root di
 * `-a`: *(optional)* Run the server as a background daemon process 
 
 ### Examples:
-1. Run the server on port 8080 serving files from the ./test_site directory:
+1. **Run the server on port 8080 serving files from the ./test_site directory:**
 ```bash
 ./http_daemon_server -p 8080 -d ./test_site
 ```
+To gracefully stop the server running in the foreground, simply press `Ctrl+C`.
 
-2. Run the server in the background:
+2. **Run the server in the background:**
 ```bash
 ./http_daemon_server -p 8080 -d ./test_site -a
 ```
-To gracefully stop the server running in the foreground, simply press Ctrl+C.
+To gracefully stop the server running in the background, run this command:
+```bash
+pkill -INT -f http_daemon_server
+```
 
+### Testing the Server
 
+Once the server is running, you can easily test it using any standard web browser or a command-line HTTP client.
+
+**Via Web Browser:**
+Navigate to the local loopback address with the port you specified:
+`http://localhost:8080` (or `http://127.0.0.1:8080`)
+
+**Via Terminal:**
+To see the raw HTTP response headers along with the content, open a new terminal tab and use `curl`:
+```bash
+curl --path-as-is http://localhost:8080 -v
+```
