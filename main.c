@@ -223,7 +223,6 @@ void write_to_log(const int client_fd, const char *method, const char *path, con
     if (getpeername(client_fd, &peer_addr, &peer_len) == 0)
         inet_ntop(AF_INET, &peer_addr.sin_addr, ip_buffer, sizeof(ip_buffer));
 
-    flockfile(log_file);
     ensure_log_file_integrity();
     fprintf(log_file, "%-6zu | %-10s | %-8s | %-*s | %-5.10s | %-30.255s | %d\n", //
             log_id++, //
@@ -234,7 +233,6 @@ void write_to_log(const int client_fd, const char *method, const char *path, con
             path ? path : "", //
             status_code);
     fflush(log_file);
-    funlockfile(log_file);
 }
 
 void register_client(void)
@@ -252,7 +250,10 @@ void register_client(void)
     ev.data.fd = client_fd;
     const int ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev);
     if (unlikely(ret == -1))
-        clean_exit(EXIT_FAILURE, "(register_client) epoll_ctl error");
+    {
+        perror("(register_client) epoll_ctl error");
+        close(client_fd);
+    }
 }
 
 void send_response_error_code(const int client_fd, const int response_code, const char *method, const char *path)
@@ -269,6 +270,7 @@ void send_response_error_code(const int client_fd, const int response_code, cons
         case 400: status_line = "HTTP/1.1 400 Bad Request\r\n"; break;
         case 403: status_line = "HTTP/1.1 403 Forbidden\r\n"; break;
         case 404: status_line = "HTTP/1.1 404 Not Found\r\n"; break;
+        case 414: status_line = "HTTP/1.1 414 URI Too Long\r\n"; break;
         case 500: status_line = "HTTP/1.1 500 Internal Server Error\r\n"; break;
         case 501: status_line = "HTTP/1.1 501 Not implemented\r\n"; break;
         case 505: status_line = "HTTP/1.1 505 HTTP Version Not Supported\r\n"; break;
@@ -310,8 +312,14 @@ void handle_get_request(const int client_fd, const char *method, char *path, con
     if (strcmp(path, "/") == 0)
         snprintf(path, path_max_len, "%s", "/index.html");
     char file_path[512];
-    snprintf(file_path, sizeof(file_path), "%s%s", document_root_path, path);
-    int file_fd = open(file_path, O_RDONLY);
+    const int req_len = snprintf(file_path, sizeof(file_path), "%s%s", document_root_path, path);
+    if (req_len >= (int)sizeof(file_path))
+    {
+        send_response_error_code(client_fd, 414, method, path);
+        return;
+    }
+
+    const int file_fd = open(file_path, O_RDONLY);
     if (file_fd == -1)
     {
         send_response_error_code(client_fd, 404, method, path);
@@ -325,7 +333,6 @@ void handle_get_request(const int client_fd, const char *method, char *path, con
     }
     if (S_ISDIR(file_stat.st_mode))
     {
-        // printf("File %s is a directory\n", file_path);
         send_response_error_code(client_fd, 403, method, path);
         goto close_file;
     }
