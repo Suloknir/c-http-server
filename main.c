@@ -23,17 +23,17 @@
 
 #define MAX_EVENTS 10
 
-volatile sig_atomic_t sigint_received = false;
-char *document_root_path = NULL;
-const char *log_path = "./server.log";
+static volatile sig_atomic_t sigint_received = false;
+static char *document_root_path = NULL;
+static const char *log_path = "./server.log";
 
-int server_fd = -1;
-int epoll_fd = -1;
-FILE *log_file = NULL;
+static int server_fd = -1;
+static int epoll_fd = -1;
+static FILE *log_file = NULL;
 
 void print_spinner(const int port)
 {
-    static uint8_t i = 0;
+    static int frame = 0;
     const char *const frames[] = {
         "|>    |", //
         "| >   |", //
@@ -49,9 +49,10 @@ void print_spinner(const int port)
         "|^    |", //
     };
     const int total_frames = sizeof(frames) / sizeof(frames[0]);
-    printf("\rListening on %-5d %s", port, frames[i % total_frames]);
+    frame = frame % total_frames;
+    printf("\rListening on %-5d %s", port, frames[frame]);
     fflush(stdout);
-    i++;
+    frame++;
 }
 
 void sigint_handler(int signum)
@@ -105,7 +106,6 @@ void parse_argv(const int argc, char *const *argv, int *ret_port, char **ret_dir
                     errx(EXIT_FAILURE, "option '%c' requires number as an argument", ret);
                 if (val < 0 || val > 65535)
                     errx(EXIT_FAILURE, "Port should be in range <0, 65535>");
-
                 *ret_port = val;
                 break;
             }
@@ -162,7 +162,7 @@ void setup_server_socket(const int port)
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_addr.s_addr = INADDR_ANY;
     serv_addr.sin_port = htons(port);
-    ret = bind(server_fd, &serv_addr, sizeof(serv_addr));
+    ret = bind(server_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr));
     if (unlikely(ret == -1))
         clean_exit(EXIT_FAILURE, "bind error");
     ret = listen(server_fd, SOMAXCONN);
@@ -174,7 +174,7 @@ void setup_epoll(const bool cloexec)
 {
     const int flags = cloexec ? EPOLL_CLOEXEC : 0;
     epoll_fd = epoll_create1(flags);
-    if (unlikely(epoll_fd) == -1)
+    if (unlikely(epoll_fd == -1))
         clean_exit(EXIT_FAILURE, "epoll_create1 error");
     struct epoll_event ev = {0};
     ev.events = EPOLLIN;
@@ -220,18 +220,20 @@ void write_to_log(const int client_fd, const char *method, const char *path, con
     char ip_buffer[INET_ADDRSTRLEN] = "unknown";
     struct sockaddr_in peer_addr;
     socklen_t peer_len = sizeof(peer_addr);
-    if (getpeername(client_fd, &peer_addr, &peer_len) == 0)
+    if (getpeername(client_fd, (struct sockaddr *)&peer_addr, &peer_len) == 0)
         inet_ntop(AF_INET, &peer_addr.sin_addr, ip_buffer, sizeof(ip_buffer));
 
     ensure_log_file_integrity();
-    fprintf(log_file, "%-6zu | %-10s | %-8s | %-*s | %-5.10s | %-30.255s | %d\n", //
-            log_id++, //
-            date_buffer, //
-            time_buffer, //
-            INET_ADDRSTRLEN - 1, ip_buffer, //
-            method ? method : "", //
-            path ? path : "", //
-            status_code);
+    fprintf(log_file,
+        "%-6zu | %-10s | %-8s | %-*s | %-5.10s | %-30.255s | %d\n", //
+        log_id++, //
+        date_buffer, //
+        time_buffer, //
+        INET_ADDRSTRLEN - 1,
+        ip_buffer, //
+        method ? method : "", //
+        path ? path : "", //
+        status_code);
     fflush(log_file);
 }
 
@@ -239,7 +241,7 @@ void register_client(void)
 {
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);
-    int client_fd = accept(server_fd, &client_addr, &addr_len);
+    int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &addr_len);
     if (client_fd == -1)
     {
         perror("(register_client) accept error");
@@ -339,13 +341,15 @@ void handle_get_request(const int client_fd, const char *method, char *path, con
 
     char header_buffer[512];
     const char *mime_type = get_mime_type(file_path);
-    int header_len = snprintf(header_buffer, sizeof(header_buffer),
-                              "HTTP/1.1 200 OK\r\n"
-                              "Content-Type: %s\r\n"
-                              "Content-Length: %ld\r\n"
-                              "Connection: close\r\n"
-                              "\r\n",
-                              mime_type, file_stat.st_size);
+    int header_len = snprintf(header_buffer,
+        sizeof(header_buffer),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %ld\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        mime_type,
+        file_stat.st_size);
     write(client_fd, header_buffer, header_len);
     write_to_log(client_fd, method, path, 200);
     sendfile(client_fd, file_fd, NULL, file_stat.st_size);
@@ -355,7 +359,7 @@ close_file:
 
 void process_request(const int client_fd)
 {
-    const int buffer_size = 4096;
+    const size_t buffer_size = 4096;
     char request_buffer[buffer_size];
     char method[16];
     const size_t path_max_len = 256;
@@ -377,7 +381,10 @@ void process_request(const int client_fd)
         goto close_client;
     }
     if (strcmp(protocol, "HTTP/1.1") != 0)
+    {
         send_response_error_code(client_fd, 505, method, path);
+        goto close_client;
+    }
     if (strcmp(method, "GET") == 0)
         handle_get_request(client_fd, method, path, path_max_len);
     else
@@ -434,20 +441,31 @@ int main(int argc, char *argv[])
     int port;
     bool is_daemon;
     parse_argv(argc, argv, &port, &document_root_path, &is_daemon);
-    if (is_daemon)
-    {
-        printf("Server will continue as a daemon process\n");
-        bool keep_working_directory = true;
-        bool keep_standard_streams_open = false;
-        if (daemon(keep_working_directory, keep_standard_streams_open) != 0)
-            err(EXIT_FAILURE, "daemon error\n");
-    }
 
     normalize_path();
     check_document_root();
     setup_server_socket(port);
     setup_epoll(false);
     open_or_create_log_file();
+    if (is_daemon)
+    {
+        const char *executable_name = argv[0];
+        size_t exec_path_size = strlen(executable_name);
+        for (size_t i = 0; i < exec_path_size; i++)
+        {
+            if (argv[0][i] == '/')
+                executable_name = &argv[0][i + 1];
+        }
+        printf("Server will continue as a daemon process.\n"
+               "To stop the server, run this command in your terminal:\n"
+               "pkill -INT -x \"%.15s\"\n",
+            executable_name);
+        fflush(stdout);
+        bool keep_working_directory = true;
+        bool keep_standard_streams_open = false;
+        if (daemon(keep_working_directory, keep_standard_streams_open) != 0)
+            err(EXIT_FAILURE, "daemon error\n");
+    }
 
     printf("Port: %d\n", port);
     printf("Document root: %s\n", document_root_path);

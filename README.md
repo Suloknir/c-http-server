@@ -48,7 +48,7 @@ To gracefully stop the server running in the foreground, simply press `Ctrl+C`.
 ```
 To gracefully stop the server running in the background, run this command:
 ```bash
-pkill -INT -f http_daemon_server
+pkill -INT -x "http_daemon_ser"
 ```
 
 ### Testing the Server
